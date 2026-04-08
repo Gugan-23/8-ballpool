@@ -11,7 +11,7 @@ import os
 # MongoDB Connection
 # ─────────────────────────────────────────────
 
-MONGO_URI = os.environ.get('MONGO_URI', 'mongodb://localhost:27017/')
+MONGO_URI = os.environ.get('MONGO_URI', 'mongodb+srv://vgugan16:gugan2004@cluster0.qyh1fuo.mongodb.net/dL?retryWrites=true&w=majority&appName=Cluster0')
 DB_NAME = 'pool_game'
 
 try:
