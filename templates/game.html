@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>8-Ball Pool — Game</title>
+  <link rel="stylesheet" href="/static/css/style.css"/>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@300;400;500;700&display=swap" rel="stylesheet">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
+</head>
+<body class="game-body">
+
+<!-- ═══════════════ LAYOUT ═══════════════ -->
+<div class="game-layout">
+
+  <!-- LEFT SIDEBAR — Player List -->
+  <aside class="sidebar sidebar-left">
+    <div class="sidebar-header">
+      <a href="/" class="back-link">← Lobby</a>
+      <div class="room-badge">ROOM: <span id="roomLabel">——</span></div>
+    </div>
+
+    <div class="section-title">PLAYERS</div>
+    <div id="playerList" class="player-list"></div>
+
+    <div class="section-title" style="margin-top:24px">LEGEND</div>
+    <div class="legend">
+      <div class="legend-row">
+        <div class="legend-ball solid"></div>
+        <span>Solids (1–7)</span>
+      </div>
+      <div class="legend-row">
+        <div class="legend-ball stripe"></div>
+        <span>Stripes (9–15)</span>
+      </div>
+      <div class="legend-row">
+        <div class="legend-ball eight"></div>
+        <span>8-Ball (win condition)</span>
+      </div>
+    </div>
+
+    <div class="section-title" style="margin-top:24px">LOG</div>
+    <div id="gameLog" class="game-log"></div>
+  </aside>
+
+  <!-- CENTER — Canvas -->
+  <main class="canvas-area">
+    <div class="table-wrapper">
+      <!-- Power meter -->
+      <div class="power-wrap" id="powerWrap" style="display:none">
+        <div class="power-label">POWER</div>
+        <div class="power-track">
+          <div class="power-fill" id="powerFill"></div>
+        </div>
+        <div class="power-pct" id="powerPct">0%</div>
+      </div>
+
+      <canvas id="poolCanvas"></canvas>
+
+      <!-- Overlay messages -->
+      <div class="canvas-overlay" id="overlay">
+        <div class="overlay-card" id="overlayCard">
+          <div class="overlay-icon">🎱</div>
+          <div class="overlay-title" id="overlayTitle">WAITING FOR PLAYERS</div>
+          <div class="overlay-sub" id="overlaySub">Share the Room ID to invite friends</div>
+          <button class="btn-start" id="overlayBtn" style="display:none" onclick="sendRestart()">PLAY AGAIN</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Shot controls hint -->
+    <div class="controls-hint" id="controlsHint" style="display:none">
+      <span>🖱 Click &amp; drag to aim</span>
+      <span class="dot">·</span>
+      <span>Hold longer for more power</span>
+      <span class="dot">·</span>
+      <span id="turnLabel">Waiting...</span>
+    </div>
+  </main>
+
+  <!-- RIGHT SIDEBAR — Score & Chat -->
+  <aside class="sidebar sidebar-right">
+    <div class="section-title">SCOREBOARD</div>
+    <div id="scoreBoard" class="score-board"></div>
+
+    <div class="section-title" style="margin-top:24px">BALLS POTTED</div>
+    <div id="ballTracker" class="ball-tracker"></div>
+
+    <div class="section-title" style="margin-top:24px">CHAT</div>
+    <div id="chatMessages" class="chat-messages"></div>
+    <div class="chat-input-row">
+      <input type="text" id="chatInput" placeholder="Say something..." maxlength="80"/>
+      <button id="chatSend">➤</button>
+    </div>
+  </aside>
+
+</div>
+
+<!-- ═══════════════ GAME SCRIPT ═══════════════ -->
+<script src="/static/js/game.js"></script>
+
+<script>
+  // Retrieve player info from session
+  const ROOM_ID = "{{ room_id }}";
+  const PLAYER_NAME = sessionStorage.getItem('playerName') || 'Player';
+
+  document.getElementById('roomLabel').textContent = ROOM_ID;
+
+  // Initialize game once DOM is ready
+  window.addEventListener('DOMContentLoaded', () => {
+    initGame(ROOM_ID, PLAYER_NAME);
+  });
+
+  function sendRestart() {
+    if (window._socket) {
+      window._socket.emit('restart_game', { room_id: ROOM_ID });
+    }
+  }
+</script>
+
+</body>
+</html>

@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>8-Ball Pool — Lobby</title>
+  <link rel="stylesheet" href="/static/css/style.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@300;400;500;700&display=swap" rel="stylesheet">
+</head>
+<body class="lobby-body">
+
+  <!-- Animated felt texture background -->
+  <div class="felt-bg"></div>
+  <div class="vignette"></div>
+
+  <!-- Floating balls decoration -->
+  <div class="deco-balls">
+    <div class="deco-ball b1">1</div>
+    <div class="deco-ball b8">8</div>
+    <div class="deco-ball b9 stripe">9</div>
+    <div class="deco-ball b3">3</div>
+    <div class="deco-ball b12 stripe">12</div>
+  </div>
+
+  <main class="lobby-container">
+    <div class="lobby-card">
+      <!-- Logo -->
+      <div class="logo-section">
+        <div class="cue-icon">🎱</div>
+        <h1 class="game-title">8-BALL POOL</h1>
+        <p class="game-subtitle">Multiplayer · Real-Time · Classic Rules</p>
+      </div>
+
+      <!-- Form -->
+      <form class="lobby-form" id="lobbyForm">
+        <div class="form-group">
+          <label for="playerName">YOUR NAME</label>
+          <input
+            type="text"
+            id="playerName"
+            placeholder="Enter your name"
+            maxlength="20"
+            autocomplete="off"
+            required
+          />
+        </div>
+
+        <div class="form-group">
+          <label for="roomId">ROOM ID</label>
+          <div class="room-input-row">
+            <input
+              type="text"
+              id="roomId"
+              placeholder="e.g. POOL01"
+              maxlength="10"
+              autocomplete="off"
+              style="text-transform:uppercase"
+            />
+            <button type="button" class="btn-random" id="randomRoom" title="Generate random room">
+              🎲
+            </button>
+          </div>
+          <span class="room-hint" id="roomHint"></span>
+        </div>
+
+        <button type="submit" class="btn-play" id="playBtn">
+          <span class="btn-text">JOIN TABLE</span>
+          <div class="btn-shine"></div>
+        </button>
+      </form>
+
+      <!-- Rules quick summary -->
+      <div class="rules-strip">
+        <span>Up to 4 players per room</span>
+        <span class="dot">·</span>
+        <span>Solids 1–7 · Stripes 9–15</span>
+        <span class="dot">·</span>
+        <span>Pot the 8-ball to win</span>
+      </div>
+    </div>
+
+    <!-- Recent matches (populated by JS) -->
+    <div class="history-panel" id="historyPanel" style="display:none">
+      <h3>RECENT MATCHES</h3>
+      <div id="historyList"></div>
+    </div>
+  </main>
+
+  <script>
+    const lobbyForm = document.getElementById('lobbyForm');
+    const playerNameInput = document.getElementById('playerName');
+    const roomIdInput = document.getElementById('roomId');
+    const randomBtn = document.getElementById('randomRoom');
+    const playBtn = document.getElementById('playBtn');
+    const roomHint = document.getElementById('roomHint');
+
+    // Generate a random room ID
+    function generateRoomId() {
+      const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+      return Array.from({length: 6}, () => chars[Math.floor(Math.random() * chars.length)]).join('');
+    }
+
+    randomBtn.addEventListener('click', () => {
+      roomIdInput.value = generateRoomId();
+      checkRoom(roomIdInput.value);
+    });
+
+    // Force uppercase room ID
+    roomIdInput.addEventListener('input', () => {
+      roomIdInput.value = roomIdInput.value.toUpperCase();
+      if (roomIdInput.value.length >= 4) checkRoom(roomIdInput.value);
+      else roomHint.textContent = '';
+    });
+
+    // Check room status via API
+    async function checkRoom(roomId) {
+      try {
+        const res = await fetch(`/api/rooms/${roomId}`);
+        const data = await res.json();
+        if (!data.exists) {
+          roomHint.textContent = '✦ New room will be created';
+          roomHint.className = 'room-hint hint-new';
+        } else if (data.player_count >= 4) {
+          roomHint.textContent = '✗ Room is full (4/4)';
+          roomHint.className = 'room-hint hint-full';
+        } else {
+          roomHint.textContent = `✓ ${data.player_count}/4 players · Click to join`;
+          roomHint.className = 'room-hint hint-open';
+        }
+      } catch (e) {
+        roomHint.textContent = '';
+      }
+    }
+
+    // Form submit
+    lobbyForm.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const name = playerNameInput.value.trim();
+      let room = roomIdInput.value.trim().toUpperCase();
+
+      if (!name) { playerNameInput.focus(); return; }
+      if (!room) room = generateRoomId();
+
+      // Store in session
+      sessionStorage.setItem('playerName', name);
+      sessionStorage.setItem('roomId', room);
+
+      // Animate button
+      playBtn.classList.add('loading');
+      playBtn.querySelector('.btn-text').textContent = 'JOINING...';
+
+      setTimeout(() => {
+        window.location.href = `/game/${room}`;
+      }, 400);
+    });
+
+    // Load match history
+    async function loadHistory() {
+      try {
+        const res = await fetch('/api/history');
+        const history = await res.json();
+        if (history.length === 0) return;
+
+        const panel = document.getElementById('historyPanel');
+        const list = document.getElementById('historyList');
+        panel.style.display = 'block';
+
+        list.innerHTML = history.slice(0, 5).map(m => `
+          <div class="history-item">
+            <span class="hist-winner">🏆 ${m.winner_name}</span>
+            <span class="hist-room">Room ${m.room_id}</span>
+            <span class="hist-players">${m.players.map(p => p.name).join(', ')}</span>
+          </div>
+        `).join('');
+      } catch (e) { /* MongoDB might be offline */ }
+    }
+
+    loadHistory();
+
+    // Pre-fill from session if returning
+    const savedName = sessionStorage.getItem('playerName');
+    if (savedName) playerNameInput.value = savedName;
+  </script>
+</body>
+</html>
