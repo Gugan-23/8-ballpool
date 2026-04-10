@@ -25,7 +25,6 @@ socketio = SocketIO(app, cors_allowed_origins="*", logger=False, engineio_logger
 active_rooms = {}
 
 
-
 # ─────────────────────────────────────────────
 # HTTP Routes
 # ─────────────────────────────────────────────
@@ -54,7 +53,6 @@ def get_room_info(room_id):
 def match_history():
     history = get_match_history(limit=10)
     return jsonify(history)
-
 
 
 # ─────────────────────────────────────────────
@@ -122,7 +120,7 @@ def handle_join_room(data):
     player_id = str(uuid.uuid4())[:8]
     player = {
         'id': player_id,
-        'sid': request.sid,
+        'sid': request.sid,       # ✅ sid stored here, used for auth below
         'name': player_name,
         'score': 0,
         'group': None,
@@ -146,7 +144,8 @@ def handle_join_room(data):
         'players': active_rooms[room_id]['players']
     }, room=room_id, include_self=False)
 
-    print(f"[JOIN] {player_name} joined room {room_id} ({len(active_rooms[room_id]['players'])}/4 players)")
+    print(f"[JOIN] {player_name} joined room {room_id} "
+          f"({len(active_rooms[room_id]['players'])}/4 players)")
 
     if len(active_rooms[room_id]['players']) >= 2 and not room['game_state'].get('started'):
         _start_game(room_id)
@@ -165,13 +164,23 @@ def handle_cue_shot(data):
     room = active_rooms[room_id]
     game_state = room['game_state']
 
+    if not game_state.get('started'):
+        emit('error', {'message': 'Game has not started yet'})
+        return
+
     if game_state.get('current_player_id') != player_id:
         emit('error', {'message': 'Not your turn'})
         return
 
-    if not game_state.get('started'):
-        emit('error', {'message': 'Game has not started yet'})
-        return
+    # ─────────────────────────────────────────────
+    # Record the SOCKET SID of the player who fired.
+    # turn_result will only be accepted from this exact socket.
+    # This means even if another client sends turn_result with
+    # the correct player_id, it is rejected because their sid differs.
+    # No token needed from the frontend — sid is server-side only.
+    # ─────────────────────────────────────────────
+    game_state['shooter_sid'] = request.sid
+    game_state['turn_processed'] = False
 
     emit('shot_taken', {
         'player_id': player_id,
@@ -180,7 +189,8 @@ def handle_cue_shot(data):
         'cue_ball_pos': data.get('cue_ball_pos')
     }, room=room_id)
 
-    print(f"[SHOT] Player {player_id} in room {room_id} shot at angle={angle:.2f}, power={power:.2f}")
+    print(f"[SHOT] {player_id} (sid={request.sid}) in room {room_id} | "
+          f"angle={angle:.2f}, power={power:.2f}")
 
 @socketio.on('turn_result')
 def handle_turn_result(data):
@@ -192,9 +202,25 @@ def handle_turn_result(data):
 
     room = active_rooms[room_id]
     game_state = room['game_state']
+    players = room['players']
 
-    if game_state.get('current_player_id') != player_id:
+    # ── Guard 1: Only the socket that fired the shot can submit turn_result ──
+    # request.sid is the socket ID of whoever sent this event.
+    # We stored the shooter's sid in game_state['shooter_sid'] during cue_shot.
+    # Any other client's turn_result is silently dropped here.
+    if game_state.get('shooter_sid') != request.sid:
+        print(f"⛔ turn_result blocked — sender sid={request.sid} "
+              f"is not the shooter sid={game_state.get('shooter_sid')}")
         return
+
+    # ── Guard 2: Prevent duplicate processing of the same turn ──
+    if game_state.get('turn_processed'):
+        print("⚠️ Duplicate turn_result ignored")
+        return
+
+    # Lock immediately
+    game_state['turn_processed'] = True
+    game_state['shooter_sid'] = None     # clear so no replay possible
 
     balls_potted = data.get('balls_potted', [])
     cue_scratch = data.get('cue_scratch', False)
@@ -203,12 +229,11 @@ def handle_turn_result(data):
     ball_positions = data.get('ball_positions', {})
     eight_ball_potted = data.get('eight_ball_potted', False)
 
-    players = room['players']
     current_player = next((p for p in players if p['id'] == player_id), None)
     if not current_player:
         return
 
-    # Assign groups if first pot
+    # ── Assign groups on first pot ──
     if balls_potted and not any(p.get('group') for p in players):
         first_ball = balls_potted[0]
         if 1 <= first_ball <= 7:
@@ -225,30 +250,31 @@ def handle_turn_result(data):
         game_state['groups_assigned'] = True
         emit('groups_assigned', {'players': players}, room=room_id)
 
-    # Score own balls only
+    # ── Score own balls ──
     for ball_num in balls_potted:
         if ball_num != 8:
             current_player['balls_potted'].append(ball_num)
             current_player['score'] += 1
 
-    # Detect fouls
+    # ── Foul detection ──
     foul = False
     foul_reason = ''
+    groups_assigned = game_state.get('groups_assigned', False)
 
     if cue_scratch:
         foul = True
         foul_reason = 'Cue ball scratched!'
         game_state['ball_in_hand'] = True
-    elif not hit_own_first and game_state.get('groups_assigned'):
+    elif groups_assigned and not hit_own_first and len(balls_potted) != 0:
         foul = True
         foul_reason = 'Must hit your own balls first!'
         game_state['ball_in_hand'] = True
-    elif not rail_contacted and not balls_potted:
+    elif groups_assigned and not rail_contacted and not balls_potted:
         foul = True
         foul_reason = 'Ball or rail must be contacted!'
         game_state['ball_in_hand'] = True
 
-    # 8-ball win/loss
+    # ── 8-ball win/loss ──
     winner = None
     game_over = False
 
@@ -276,27 +302,52 @@ def handle_turn_result(data):
 
     game_state['ball_positions'] = ball_positions
 
-    # Key fix: turn never continues if foul
-    own_balls_potted = _get_own_balls(balls_potted, current_player.get('group'))
-    turn_continues = bool(own_balls_potted) and not foul and not game_over
+    # ── Turn continuation ──
+    if foul or game_over:
+        turn_continues = False
+    elif not game_state.get('groups_assigned'):
+        turn_continues = len(balls_potted) > 0
+    else:
+        own_balls = _get_own_balls(balls_potted, current_player.get('group'))
+        turn_continues = len(own_balls) > 0
 
-    if not game_over:
-        if foul:
-            _advance_turn(room_id)   # foul → next player (ball_in_hand already set)
-        elif not turn_continues:
-            _advance_turn(room_id)
-        # else: same player continues (only if legal pot and no foul)
+    # ── Advance only when turn does NOT continue ──
+    if not game_over and not turn_continues:
+        _advance_turn(room_id)
+
+    # ── Summary for UI ──
+    next_player = next((p for p in players if p['id'] == game_state['current_player_id']), None)
+    turn_summary = _build_turn_summary(
+        current_player=current_player,
+        next_player=next_player,
+        balls_potted=balls_potted,
+        foul=foul,
+        foul_reason=foul_reason,
+        turn_continues=turn_continues,
+        game_over=game_over,
+        winner=winner
+    )
+
+    print(f"[TURN #{game_state.get('turn_number', '?')}] "
+          f"{current_player['name']} | Balls: {balls_potted} | "
+          f"Foul: {foul} | Continues: {turn_continues} | "
+          f"Next: {next_player['name'] if next_player else '?'}")
+    print(f"  → {turn_summary}")
 
     emit('turn_updated', {
         'player_id': player_id,
+        'player_name': current_player['name'],
         'balls_potted': balls_potted,
         'foul': foul,
         'foul_reason': foul_reason,
-        'ball_in_hand': game_state['ball_in_hand'],
+        'ball_in_hand': game_state.get('ball_in_hand', False),
         'turn_continues': turn_continues,
         'current_player_id': game_state['current_player_id'],
+        'current_player_name': next_player['name'] if next_player else '',
         'players': players,
-        'ball_positions': ball_positions
+        'ball_positions': ball_positions,
+        'turn_summary': turn_summary,
+        'turn_number': game_state.get('turn_number', 1)
     }, room=room_id)
 
     update_room_state(room_id, game_state, players)
@@ -343,6 +394,7 @@ def handle_chat(data):
         'message': data.get('message')
     }, room=room_id)
 
+
 # ─────────────────────────────────────────────
 # Helper Functions
 # ─────────────────────────────────────────────
@@ -350,27 +402,39 @@ def handle_chat(data):
 def _start_game(room_id):
     room = active_rooms[room_id]
     players = room['players']
+    game_state = room['game_state']
 
     balls = initialize_balls()
-    game_state = room['game_state']
+
     game_state['started'] = True
     game_state['balls'] = balls
     game_state['current_player_id'] = players[0]['id']
     game_state['turn_number'] = 1
     game_state['ball_in_hand'] = False
     game_state['groups_assigned'] = False
+    game_state['turn_processed'] = False
+    game_state['shooter_sid'] = None      # no shot fired yet
 
     update_room_state(room_id, game_state, players)
 
+    first_player = players[0]
     emit('game_started', {
         'game_state': game_state,
         'players': players,
-        'current_player_id': game_state['current_player_id']
+        'current_player_id': game_state['current_player_id'],
+        'current_player_name': first_player['name'],
+        'turn_summary': f"🎱 Game started!  {first_player['name']} goes first."
     }, room=room_id)
 
-    print(f"[GAME] Started in room {room_id} with {len(players)} players")
+    print(f"[GAME] Started in room {room_id} | First: {first_player['name']}")
 
 def _advance_turn(room_id):
+    """
+    Rotates to the next player.
+    Clears shooter_sid so the new player must fire a fresh cue_shot
+    before any turn_result is accepted.
+    Emits 'turn_changed' so all clients update their UI immediately.
+    """
     if room_id not in active_rooms:
         return
 
@@ -388,25 +452,54 @@ def _advance_turn(room_id):
 
     game_state['current_player_id'] = next_player['id']
     game_state['turn_number'] = game_state.get('turn_number', 1) + 1
+    game_state['turn_processed'] = False
+    game_state['shooter_sid'] = None      # ✅ must fire cue_shot before turn_result accepted
+
+    print(f"[ADVANCE] Turn {game_state['turn_number']} → "
+          f"{next_player['name']} ({next_player['id']})")
 
     emit('turn_changed', {
         'current_player_id': next_player['id'],
         'current_player_name': next_player['name'],
         'turn_number': game_state['turn_number'],
-        'ball_in_hand': game_state['ball_in_hand']
+        'message': f"🎯 It's {next_player['name']}'s turn!"
     }, room=room_id)
+
+def _build_turn_summary(current_player, next_player, balls_potted,
+                         foul, foul_reason, turn_continues, game_over, winner):
+    """
+    Human-readable summary of what just happened.
+    Display as a toast/status banner in the frontend.
+    """
+    name = current_player['name']
+    parts = []
+
+    if game_over:
+        return f"🏆 {winner['name']} wins the game!" if winner else "Game over!"
+
+    if balls_potted:
+        ball_list = ', '.join(f"#{b}" for b in balls_potted)
+        parts.append(f"🎱 {name} potted {ball_list}.")
+    else:
+        parts.append(f"😐 {name} potted nothing.")
+
+    if foul:
+        parts.append(f"⚠️ Foul: {foul_reason}")
+
+    if turn_continues:
+        parts.append(f"➡️ {name} continues their turn!")
+    else:
+        next_name = next_player['name'] if next_player else '?'
+        parts.append(f"🔄 Now it's {next_name}'s turn!")
+
+    return '  '.join(parts)
 
 def _check_all_own_balls_potted(player, game_state):
     group = player.get('group')
     if not group:
         return False
-
     potted = set(player.get('balls_potted', []))
-    if group == 'solids':
-        required = set(range(1, 8))
-    else:
-        required = set(range(9, 16))
-
+    required = set(range(1, 8)) if group == 'solids' else set(range(9, 16))
     return required.issubset(potted)
 
 def _get_own_balls(balls_potted, group):
@@ -416,6 +509,7 @@ def _get_own_balls(balls_potted, group):
         return [b for b in balls_potted if 1 <= b <= 7]
     else:
         return [b for b in balls_potted if 9 <= b <= 15]
+
 
 # ─────────────────────────────────────────────
 # Entry Point
